@@ -1,0 +1,9 @@
+# UI Component Configuration
+stack: nextjs
+style: default
+tailwind:
+  config: tailwind.config.js
+  css: src/styles/globals.css
+aliases:
+  components: src/components
+  utils: src/lib/utils

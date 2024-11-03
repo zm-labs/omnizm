@@ -113,7 +113,6 @@ async function readComponentFromUI(componentName: string): Promise<Component> {
   }
 }
 
-
 async function init(): Promise<void> {
   intro(color.bgCyan(` omnizm - UI Component CLI `));
   console.log('Prompting for stack selection...');
@@ -147,21 +146,18 @@ async function init(): Promise<void> {
   }
 
   outro(
-    `Installation complete! Stack selected: ${color.cyan(selectedStack as Stack)}\nYou can now start adding components with ${color.green('`npx omnizm add`')}`
+    `Installation complete! Stack selected: ${color.cyan(selectedStack as Stack)}\nYou can now start adding components with ${color.green('`npx omnizm add`')} or ${color.green('`npx omnizm add <component-name>`')}`
   );
 }
 
 async function detectPackageManager(): Promise<'npm' | 'yarn' | 'pnpm'> {
   try {
-    // Check for yarn.lock first
     if (await exists('yarn.lock')) {
       return 'yarn';
     }
-    // Check for pnpm-lock.yaml
     if (await exists('pnpm-lock.yaml')) {
       return 'pnpm';
     }
-    // Default to npm
     return 'npm';
   } catch {
     return 'npm';
@@ -172,9 +168,6 @@ async function installDependencies(dependencies: string[]): Promise<void> {
   if (dependencies.length === 0) return;
 
   const packageManager = await detectPackageManager();
-  const s = spinner();
-  s.start(`Installing dependencies using ${packageManager}...`);
-
   const installCommand = {
     npm: `npm install --save ${dependencies.join(' ')}`,
     yarn: `yarn add ${dependencies.join(' ')}`,
@@ -183,30 +176,139 @@ async function installDependencies(dependencies: string[]): Promise<void> {
 
   try {
     execSync(installCommand, { stdio: 'inherit' });
-    s.stop('Dependencies installed successfully');
   } catch (error) {
-    s.stop('Failed to install dependencies');
     throw new Error(`Failed to install dependencies using ${packageManager}`);
   }
 }
+async function installComponents(components: string[]): Promise<void> {
+  const mainSpinner = spinner();
+  mainSpinner.start('Preparing to install components');
 
+  try {
+    const availableComponents = await listAvailableComponents();
+    const invalidComponents = components.filter(comp => !availableComponents.includes(comp));
+    
+    if (invalidComponents.length > 0) {
+      mainSpinner.stop('Invalid components detected');
+      console.log(color.red('\nThe following components are not available:'));
+      invalidComponents.forEach(comp => console.log(`- ${comp}`));
+      console.log('\nAvailable components:');
+      availableComponents.forEach(comp => console.log(`- ${color.cyan(comp)}`));
+      process.exit(1);
+    }
 
-async function add(): Promise<void> {
+    const componentDir = path.join(process.cwd(), 'components', 'ui');
+    await mkdir(componentDir, { recursive: true });
+
+    const allDependencies = new Set<string>();
+    const radixDependencies = new Set<string>();
+
+    // Collect dependencies
+    mainSpinner.message('Analyzing component dependencies');
+    for (const componentName of components) {
+      const component = await readComponentFromUI(componentName);
+      component.dependencies.forEach(dep => allDependencies.add(dep));
+      
+      if (componentName.toLowerCase() === 'button') {
+        radixDependencies.add('@radix-ui/react-slot');
+      }
+    }
+
+    // Install dependencies
+    if (allDependencies.size > 0) {
+      mainSpinner.message('Installing shared dependencies');
+      await installDependencies([...allDependencies]);
+    }
+
+    if (radixDependencies.size > 0) {
+      mainSpinner.message('Installing Radix UI dependencies');
+      await installDependencies([...radixDependencies]);
+    }
+
+    // Copy components
+    mainSpinner.message('Installing components');
+    const installedComponents: string[] = [];
+    const failedComponents: string[] = [];
+
+    for (const componentName of components) {
+      try {
+        const component = await readComponentFromUI(componentName);
+        for (const file of component.files) {
+          const filepath = path.join(componentDir, file.name);
+          await writeFile(filepath, file.content);
+        }
+        installedComponents.push(componentName);
+      } catch (error) {
+        failedComponents.push(componentName);
+        if (error instanceof Error) {
+          console.log(color.yellow(`\nWarning: Failed to add ${componentName}`));
+          console.log(color.dim(error.message));
+        }
+      }
+    }
+
+    mainSpinner.stop('Component installation completed');
+
+    // Show summary
+    if (installedComponents.length > 0) {
+      console.log(color.green('\nSuccessfully installed components:'));
+      installedComponents.forEach(comp => console.log(`- ${color.cyan(comp)}`));
+    }
+
+    if (failedComponents.length > 0) {
+      console.log(color.yellow('\nFailed to install components:'));
+      failedComponents.forEach(comp => console.log(`- ${color.red(comp)}`));
+    }
+
+    if (allDependencies.size > 0) {
+      console.log(
+        '\n' + color.yellow('Installed dependencies:'),
+        '\n' + Array.from(allDependencies).map(dep => `- ${dep}`).join('\n')
+      );
+    }
+
+    if (radixDependencies.size > 0) {
+      console.log(
+        '\n' + color.green('Installed Radix UI packages:'),
+        '\n' + Array.from(radixDependencies).map(dep => `- ${dep}`).join('\n')
+      );
+    }
+
+  } catch (error) {
+    mainSpinner.stop('Installation failed');
+    if (error instanceof Error) {
+      cancel(error.message);
+    } else {
+      cancel('An unexpected error occurred');
+    }
+    process.exit(1);
+  }
+}
+
+async function add(components?: string[]): Promise<void> {
   intro(color.bgCyan(` omnizm - Add Components `));
 
+  if (components && components.length > 0) {
+    // Direct installation mode
+    await installComponents(components);
+    outro('Component installation completed successfully!');
+    return;
+  }
+
+  // Interactive mode
   const s = spinner();
   s.start('Loading available components');
 
   try {
-    const components = await listAvailableComponents();
+    const availableComponents = await listAvailableComponents();
     s.stop('Components loaded');
 
-    if (components.length === 0) {
+    if (availableComponents.length === 0) {
       cancel('No components found in the ui directory');
       process.exit(1);
     }
 
-    const componentOptions = components.map(comp => ({
+    const componentOptions = availableComponents.map(comp => ({
       value: comp,
       label: color.cyan(comp),
       hint: `ui/${comp}.tsx`
@@ -224,109 +326,9 @@ async function add(): Promise<void> {
       process.exit(1);
     }
 
-    const componentDir = path.join(process.cwd(), 'components', 'ui');
-    await mkdir(componentDir, { recursive: true });
-
-    const allDependencies = new Set<string>();
-    const radixDependencies = new Set<string>();
-
-    // First pass: Collect all dependencies
-    s.start('Analyzing component dependencies');
-    for (const componentName of selectedComponents) {
-      const component = await readComponentFromUI(componentName as string);
-      component.dependencies.forEach(dep => allDependencies.add(dep));
-      
-      if (componentName.toString().toLowerCase() === 'button') {
-        radixDependencies.add('@radix-ui/react-slot');
-      }
-    }
-    s.stop('Dependencies analyzed');
-
-    // Install all dependencies first
-    if (allDependencies.size > 0) {
-      s.start('Installing shared dependencies');
-      try {
-        await installDependencies([...allDependencies]);
-        s.stop('Shared dependencies installed');
-      } catch (error) {
-        s.stop('Failed to install shared dependencies');
-        console.log(color.yellow('\nWarning: Failed to install dependencies'));
-        if (error instanceof Error) {
-          console.log(color.dim(error.message));
-        }
-      }
-    }
-
-    // Install Radix dependencies if needed
-    if (radixDependencies.size > 0) {
-      s.start('Installing Radix UI dependencies');
-      try {
-        await installDependencies([...radixDependencies]);
-        s.stop('Radix UI dependencies installed');
-      } catch (error) {
-        s.stop('Failed to install Radix UI dependencies');
-        console.log(color.yellow('\nWarning: Failed to install Radix UI dependencies'));
-        if (error instanceof Error) {
-          console.log(color.dim(error.message));
-        }
-      }
-    }
-
-    // Second pass: Copy component files
-    s.start('Copying component files');
-    const installedComponents: string[] = [];
-    const failedComponents: string[] = [];
-
-    for (const componentName of selectedComponents) {
-      try {
-        const component = await readComponentFromUI(componentName as string);
-        for (const file of component.files) {
-          const filepath = path.join(componentDir, file.name);
-          await writeFile(filepath, file.content);
-        }
-        installedComponents.push(componentName as string);
-      } catch (error) {
-        failedComponents.push(componentName as string);
-        if (error instanceof Error) {
-          console.log(color.yellow(`\nWarning: Failed to add ${componentName}`));
-          console.log(color.dim(error.message));
-        }
-      }
-    }
-    s.stop('Component files copied');
-
-    // Show installation summary
-    if (installedComponents.length > 0) {
-      console.log(color.green('\nSuccessfully installed components:'));
-      installedComponents.forEach(comp => {
-        console.log(`- ${color.cyan(comp)}`);
-      });
-    }
-
-    if (failedComponents.length > 0) {
-      console.log(color.yellow('\nFailed to install components:'));
-      failedComponents.forEach(comp => {
-        console.log(`- ${color.red(comp)}`);
-      });
-    }
-
-    if (allDependencies.size > 0) {
-      console.log(
-        '\n' + color.yellow('Installed dependencies:'),
-        '\n' + Array.from(allDependencies).map(dep => `- ${dep}`).join('\n')
-      );
-    }
-
-    if (radixDependencies.size > 0) {
-      console.log(
-        '\n' + color.green('Installed Radix UI packages:'),
-        '\n' + Array.from(radixDependencies).map(dep => `- ${dep}`).join('\n')
-      );
-    }
-
+    await installComponents(selectedComponents as string[]);
     outro('Component installation completed successfully!');
   } catch (error) {
-    s.stop('Failed to add components');
     if (error instanceof Error) {
       cancel(error.message);
     } else {
@@ -335,21 +337,20 @@ async function add(): Promise<void> {
     process.exit(1);
   }
 }
-// Type definition for supported commands
-type Command = 'init' | 'add';
 
 // Main CLI logic
 const args = process.argv.slice(2);
-const command = args[0] as Command;
+const command = args[0];
 
 switch (command) {
   case 'init':
     await init();
     break;
   case 'add':
-    await add();
+    const components = args.slice(1);
+    await add(components);
     break;
   default:
-    cancel('Unknown command. Use `init` or `add`');
+    cancel('Unknown command. Use `init` or `add [component-name]`');
     process.exit(1);
 }
